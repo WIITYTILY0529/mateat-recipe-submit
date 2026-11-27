@@ -59,9 +59,6 @@ textarea.paste { min-height: 220px }
 .label small { color: var(--muted); font-weight: 400 }
 details.alt summary { cursor: pointer; color: var(--muted); font-size: 14px }
 details.alt input { margin-top: 8px }
-.imgs { margin: 0; padding-left: 22px; display: grid; gap: 4px; font-size: 13px; max-height: 220px; overflow-y: auto; min-width: 0 }
-.imgs a { color: var(--info); overflow-wrap: anywhere }
-.imgs:empty::before { content: "찾은 이미지가 없어요."; color: var(--muted); margin-left: -22px }
 .bundle-list { margin: 0; padding-left: 22px; display: grid; gap: 8px; font-size: 14px; min-width: 0 }
 .bundle-list li > div { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; min-width: 0 }
 .bundle-list .url { color: var(--muted); font-size: 12px; overflow-wrap: anywhere }
@@ -118,10 +115,6 @@ details.alt input { margin-top: 8px }
       <div class="field"><label for="comments">댓글 수</label><input type="number" id="comments" min="0" inputmode="numeric" data-meta></div>
     </div>
     <label class="check"><input type="checkbox" id="mate" data-meta> 네이버 메이트 글입니다</label>
-    <div class="field">
-      <span class="label">이미지 <small id="img-count"></small></span>
-      <ol class="imgs" id="images"></ol>
-    </div>
     <div class="actions">
       <button id="extract">다시 추출하기</button>
       <button id="stop" class="ghost" hidden>중지</button>
@@ -184,7 +177,7 @@ function el(tag, cls, text) { const n = document.createElement(tag); if (cls) n.
 function note(target, kind, text) { $(target).replaceChildren(el('div', `note ${kind}`, text)); }
 function normalizeUrl(u) { return u.trim().replace(/\/+$/, '').replace('://m.blog.naver.com/', '://blog.naver.com/'); }
 
-let images = [], publishedRaw = null, pending = false, lastKey = '';
+let publishedRaw = null, pending = false, lastKey = '';
 /* ---------- Pages 판: Worker 호출 ---------- */
 function passcode() { return $('passcode').value.trim(); }
 async function callWorker(path, init) {
@@ -210,6 +203,20 @@ const browserDownloads = {
     a.download = filename; document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   },
 };
+/* 스마트에디터 ONE 본문에서 문단(.se-text-paragraph, 안의 <span id="SE-...">)과 표만 순서대로 모읍니다.
+   사진·링크 미리보기·지도·스티커·동영상 같은 구성 요소는 건너뜁니다. (naver_blog.py의 editor_text와 같은 규칙) */
+const SKIP_COMPONENTS = ['se-image', 'se-imageStrip', 'se-imageGroup', 'se-oglink', 'se-placesMap', 'se-map',
+  'se-sticker', 'se-video', 'se-oembed', 'se-file', 'se-material', 'se-horizontalLine'];
+function editorText(body) {
+  const clean = n => n.textContent.replace(/​/g, '').replace(/\s+/g, ' ').trim();
+  const lines = [];
+  for (const c of body.querySelectorAll(':scope > .se-component')) {
+    if (SKIP_COMPONENTS.some(k => c.classList.contains(k))) continue;
+    if (c.classList.contains('se-table')) c.querySelectorAll('tr').forEach(tr => lines.push([...tr.querySelectorAll('td, th')].map(clean).filter(Boolean).join(' | ')));
+    else c.querySelectorAll('.se-text-paragraph').forEach(p => lines.push(clean(p)));
+  }
+  return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
 /* naver_blog.py의 parse_post와 같은 규칙으로 PostView HTML에서 본문과 글 정보를 뽑습니다. */
 function parsePost(html, rendered) {
   const doc = new DOMParser().parseFromString(html, 'text/html');
@@ -230,8 +237,8 @@ function parsePost(html, rendered) {
     comments = found.size === 1 ? [...found][0] : null;
   }
   const body = doc.querySelector('.se-main-container, .se_component_wrap, .post-view') || doc.querySelector('#postViewArea');
-  let text = '';
-  if (body) {
+  let text = body ? editorText(body) : '';
+  if (body && !text) {  // 스마트에디터 ONE이 아닌 옛 글은 본문 전체 글자를 씁니다.
     body.querySelectorAll('script, style, template, noscript, iframe, nav, footer, aside, button, svg, [hidden], [aria-hidden=true]').forEach(n => n.remove());
     body.querySelectorAll('br').forEach(n => n.replaceWith('\n'));
     body.querySelectorAll('hr, div, p, li, h1, h2, h3, h4, h5, h6, tr, blockquote, figcaption').forEach(n => { n.before('\n'); n.after('\n'); });
@@ -244,7 +251,7 @@ function parsePost(html, rendered) {
   const likeValues = new Set(likeSpans.filter(v => v));
   const likes = likeValues.size === 1 ? [...likeValues][0] : rendered && likeSpans.length && !likeValues.size ? 0 : null;
   return {
-    text, comments, html: body ? body.innerHTML : '', likes,
+    text, comments, likes,
     // 작성자: 글 상단 <a class="link pcol2">닉네임</a>
     author: pick('a.link.pcol2') || meta['author'] || meta['article:author:name'] || pick('.blog_author .name, .se_author .name, .blog2_series .nick, .blog2_series .nickname, .writer_info .nick, .nick'),
     published: meta['article:published_time'] || pick('time[datetime]', 'datetime') || pick('.se_publishDate, .blog_date, .blog2_series .date, ._postAddDate, .post_date'),
@@ -265,7 +272,7 @@ async function fetchPost() {
     $('text').value = post.text; $('text').dispatchEvent(new Event('input'));
     $('author').value = post.author || ''; $('comments').value = post.comments ?? ''; $('likes').value = post.likes ?? ''; $('published').value = '';
     $('likes').placeholder = post.likes === null ? '못 가져옴 · 직접 입력' : '';
-    readPaste(`${post.published || ''}\n${post.text}`, post.html);
+    readPaste(`${post.published || ''}\n${post.text}`, '');
     if (post.published) publishedRaw = post.published;
     showMeta(); $('to-claude').disabled = false; runExtract(true);
   } catch (e) {
@@ -327,17 +334,6 @@ function postUrl(raw) {
   const q = m[0].match(/blogId=([A-Za-z0-9_-]+).*logNo=(\d+)/);
   return normalizeUrl(q ? `https://blog.naver.com/${q[1]}/${q[2]}` : m[0]);
 }
-function findImages(html) {
-  if (!html) return [];
-  const doc = new DOMParser().parseFromString(html, 'text/html'), out = [];
-  doc.querySelectorAll('img').forEach(img => {
-    for (const a of ['data-lazy-src', 'data-src', 'src']) {
-      const v = (img.getAttribute(a) || '').trim();
-      if (/^https:\/\//.test(v) && !/\/static\/|blogimgs|emoticon|sticker|profile|\/icon|favicon|ssl\.pstatic\.net\/static/i.test(v)) { out.push(v); break; }
-    }
-  });
-  return [...new Set(out)].slice(0, 40);
-}
 function findMeta(text) {
   const meta = {};
   let m = text.match(/(\d{4})\.\s*(\d{1,2})\.\s*(\d{1,2})\.\s*(\d{1,2}:\d{2})?/);
@@ -352,8 +348,6 @@ function setIf(id, v) { if (v !== undefined && v !== null && v !== '' && !$(id).
 function showMeta() {
   $('meta').hidden = false;
   $('published-raw').textContent = publishedRaw ? `원문 표시: ${publishedRaw}` : '';
-  $('img-count').textContent = images.length ? `${images.length}개 · 새 창에서 열림` : '';
-  $('images').replaceChildren(...images.map((u, i) => { const li = el('li'), a = el('a', '', u); a.href = u; a.target = '_blank'; a.rel = 'noopener noreferrer'; a.title = `이미지 ${i + 1}`; li.append(a); return li; }));
 }
 function readPaste(text, html) {
   const meta = findMeta(text);
@@ -361,7 +355,6 @@ function readPaste(text, html) {
   publishedRaw = meta.raw || null;
   setIf('published', meta.date); setIf('likes', meta.likes); setIf('comments', meta.comments);
   if (meta.mate || /네이버\s*메이트/.test(html || '')) $('mate').checked = true;
-  images = findImages(html);
   showMeta();
 }
 $('text').addEventListener('paste', e => {
@@ -384,7 +377,7 @@ function sourceFor(url, origin) {
   const handle = (url.match(/^https?:\/\/blog\.naver\.com\/([^/?#]+)\//) || [])[1] || null;
   return { platform: 'Naver Blog', post_author: $('author').value.trim() || null, author_handle: handle, url,
     published_date: $('published').value || null, published_at_raw: publishedRaw, is_naver_mate: $('mate').checked ? true : null,
-    recipe_origin: origin ?? null, images };
+    recipe_origin: origin ?? null };
 }
 /* 글 정보를 고치면 JSON의 source·engagement에 바로 반영합니다. */
 function syncMeta() {
