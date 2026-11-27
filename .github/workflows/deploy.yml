@@ -28,5 +28,7 @@ jobs:
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site
+      # 올린 직후에는 GitHub가 artifact를 아직 목록에 보여 주지 않아 배포가 "No artifacts" 로 실패하곤 해서 잠시 기다립니다.
+      - run: sleep 15
       - id: deployment
         uses: actions/deploy-pages@v4
