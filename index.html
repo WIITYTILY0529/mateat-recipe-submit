@@ -211,7 +211,7 @@ const browserDownloads = {
   },
 };
 /* naver_blog.py의 parse_post와 같은 규칙으로 PostView HTML에서 본문과 글 정보를 뽑습니다. */
-function parsePost(html) {
+function parsePost(html, rendered) {
   const doc = new DOMParser().parseFromString(html, 'text/html');
   const meta = {};
   doc.querySelectorAll('meta').forEach(m => { const k = (m.getAttribute('property') || m.getAttribute('name') || '').toLowerCase(); if (k) meta[k] = (m.getAttribute('content') || '').trim(); });
@@ -238,10 +238,13 @@ function parsePost(html) {
     body.querySelectorAll('td, th').forEach(n => n.after(' '));
     text = body.textContent.split('\n').map(l => l.replace(/[\s​]+/g, ' ').trim()).join('\n').replace(/\n{3,}/g, '\n\n').trim();
   }
-  // 공감 수: <span class="u_likeit_text _count num">. 받아온 화면에는 자리 표시 0만 있어 0이 아닌 값이 하나일 때만 씁니다.
-  const likeValues = new Set([...doc.querySelectorAll('span.u_likeit_text._count.num')].map(n => count(n.textContent)).filter(v => v));
+  // 공감 수: <span class="u_likeit_text _count num">. Worker가 헤드리스 브라우저로 띄운 화면(rendered)이면 실제 숫자가 들어 있고,
+  // 그냥 받은 화면이면 자리 표시 0만 있어 0이 아닌 값이 하나일 때만 씁니다.
+  const likeSpans = [...doc.querySelectorAll('span.u_likeit_text._count.num')].map(n => count(n.textContent)).filter(v => v !== null);
+  const likeValues = new Set(likeSpans.filter(v => v));
+  const likes = likeValues.size === 1 ? [...likeValues][0] : rendered && likeSpans.length && !likeValues.size ? 0 : null;
   return {
-    text, comments, html: body ? body.innerHTML : '', likes: likeValues.size === 1 ? [...likeValues][0] : null,
+    text, comments, html: body ? body.innerHTML : '', likes,
     // 작성자: 글 상단 <a class="link pcol2">닉네임</a>
     author: pick('a.link.pcol2') || meta['author'] || meta['article:author:name'] || pick('.blog_author .name, .se_author .name, .blog2_series .nick, .blog2_series .nickname, .writer_info .nick, .nick'),
     published: meta['article:published_time'] || pick('time[datetime]', 'datetime') || pick('.se_publishDate, .blog_date, .blog2_series .date, ._postAddDate, .post_date'),
@@ -257,7 +260,7 @@ async function fetchPost() {
   try {
     const res = await callWorker('/post?url=' + encodeURIComponent(url));
     if (!res.ok) { const b = await res.json().catch(() => ({})); throw { code: 'upstream', message: b.error }; }
-    const post = parsePost(await res.text());
+    const post = parsePost(await res.text(), res.headers.get('X-Post-Source') === 'rendered');
     if (!post.text) throw { code: 'upstream', message: '글 본문을 찾지 못했어요. 비공개 글인지 확인해 주세요.' };
     $('text').value = post.text; $('text').dispatchEvent(new Event('input'));
     $('author').value = post.author || ''; $('comments').value = post.comments ?? ''; $('likes').value = post.likes ?? ''; $('published').value = '';

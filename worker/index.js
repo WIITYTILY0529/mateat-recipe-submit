@@ -1,10 +1,12 @@
 /**
  * Cloudflare Worker — MATEat 레시피 제출 페이지용 서버
- *   GET  /post?url=<네이버 블로그 글 URL>  → 글 HTML (PostView 화면)
+ *   GET  /post?url=<네이버 블로그 글 URL>  → 글 HTML (PostView 화면, 헤드리스 브라우저로 띄운 뒤. 실패하면 그냥 받은 HTML)
  *   POST /extract {prompt}                 → 레시피 추출 결과 JSON (OpenAI 호환 API 사용)
  * 두 요청 모두 X-Passcode 헤더가 PASSCODE 비밀값과 같아야 합니다.
  * 비밀값: PASSCODE, ANSWER_API_BASE_URL, ANSWER_API_KEY, ANSWER_API_MODEL / 변수: ALLOWED_ORIGIN
  */
+
+import puppeteer from '@cloudflare/puppeteer';
 
 const AGENT = 'MATEatRecipeSource/1.0';
 const MAX_PROMPT = 400_000;
@@ -18,7 +20,7 @@ export default {
       return json(401, { error: '팀 암호가 맞지 않습니다.' }, cors);
     }
     try {
-      if (request.method === 'GET' && url.pathname === '/post') return await post(url.searchParams.get('url') || '', cors);
+      if (request.method === 'GET' && url.pathname === '/post') return await post(url.searchParams.get('url') || '', env, cors);
       if (request.method === 'POST' && url.pathname === '/extract') return await extract(request, env, cors);
     } catch (e) {
       return json(502, { error: String(e && e.message || e) }, cors);
@@ -40,14 +42,41 @@ function postViewUrl(raw) {
   return `https://blog.naver.com/PostView.naver?blogId=${id}&logNo=${no}`;
 }
 
-async function post(raw, cors) {
+/* 공감 수는 화면 스크립트가 나중에 채우므로, Cloudflare 헤드리스 브라우저로 글을 띄워 실제 숫자가 나온 뒤의 HTML을 받습니다.
+   (naver_blog.py의 Playwright 단계와 같은 방식) 공감이 정말 0이면 8초 기다린 뒤 그대로 받습니다. */
+async function rendered(env, target) {
+  const browser = await puppeteer.launch(env.BROWSER);
+  try {
+    const page = await browser.newPage();
+    await page.setUserAgent(`Mozilla/5.0 (compatible; ${AGENT})`);
+    await page.setRequestInterception(true);
+    page.on('request', r => (['image', 'media', 'font'].includes(r.resourceType()) ? r.abort() : r.continue()));
+    await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 20_000 });
+    await page.waitForFunction(
+      () => [...document.querySelectorAll('span.u_likeit_text._count.num')].some(n => /^[\d,]*[1-9][\d,]*$/.test(n.textContent.trim())),
+      { timeout: 8_000 },
+    ).catch(() => {});
+    return await page.content();
+  } finally {
+    await browser.close();
+  }
+}
+
+async function post(raw, env, cors) {
   const target = postViewUrl(raw);
   if (!target) return json(400, { error: '글 번호가 있는 네이버 블로그 글 주소를 넣어 주세요.' }, cors);
-  const res = await fetch(target, { headers: { 'User-Agent': AGENT, Accept: 'text/html' }, redirect: 'follow' });
-  if (!res.ok) return json(502, { error: `네이버가 글을 돌려주지 않았습니다 (HTTP ${res.status}).` }, cors);
-  const html = await res.text();
+  let html = null, how = 'static';
+  if (env.BROWSER) {
+    try { html = await rendered(env, target); how = 'rendered'; }
+    catch (e) { console.log('render failed, falling back to plain fetch:', e && e.message); }
+  }
+  if (!html) {
+    const res = await fetch(target, { headers: { 'User-Agent': AGENT, Accept: 'text/html' }, redirect: 'follow' });
+    if (!res.ok) return json(502, { error: `네이버가 글을 돌려주지 않았습니다 (HTTP ${res.status}).` }, cors);
+    html = await res.text();
+  }
   if (html.length > 5_000_000) return json(502, { error: '글 화면이 너무 큽니다.' }, cors);
-  return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8', ...cors } });
+  return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8', 'X-Post-Source': how, ...cors } });
 }
 
 async function extract(request, env, cors) {
@@ -98,6 +127,7 @@ function corsHeaders(env) {
     'Access-Control-Allow-Origin': env.ALLOWED_ORIGIN || '*',
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, X-Passcode',
+    'Access-Control-Expose-Headers': 'X-Post-Source',
     Vary: 'Origin',
   };
 }

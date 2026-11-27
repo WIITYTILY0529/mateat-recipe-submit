@@ -1,6 +1,11 @@
 name = "mateat-recipe-worker"
 main = "index.js"
-compatibility_date = "2024-11-01"
+compatibility_date = "2025-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# 공감 수처럼 화면 스크립트가 채우는 값을 읽기 위한 Cloudflare 헤드리스 브라우저(Browser Rendering)
+[browser]
+binding = "BROWSER"
 
 [vars]
 ALLOWED_ORIGIN = "https://wiitytily0529.github.io"
