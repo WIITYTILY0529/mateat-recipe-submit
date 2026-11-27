@@ -167,9 +167,11 @@ async function callWorker(path, init) {
 const workerSample = {
   async json(prompt, { signal } = {}) {
     const res = await callWorker('/extract', { method: 'POST', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt }) });
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw { code: body.error === 'truncated' || body.error === 'invalid_json' ? body.error : 'upstream', message: body.error };
-    return body;
+    if (!res.ok) { const body = await res.json().catch(() => ({})); throw { code: 'upstream', message: body.error }; }
+    // Worker는 모델이 쓰는 글자를 그대로 흘려보내고, 끝에 \u0000 뒤로 finish_reason을 붙입니다.
+    const [text, finish] = (await res.text()).split('\u0000');
+    try { return JSON.parse(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1)); }
+    catch { throw { code: finish === 'length' ? 'truncated' : finish === 'error' ? 'upstream' : 'invalid_json', message: finish === 'error' ? '추출 API 응답이 중간에 끊겼어요. 다시 추출해 주세요.' : undefined }; }
   },
 };
 const browserDownloads = {
@@ -375,7 +377,7 @@ async function runExtract(force) {
   if (controller) controller.abort();
   lastKey = key; pending = false; const mine = controller = new AbortController();
   $('extract').disabled = true; $('stop').hidden = false;
-  note('source-note', 'info', 'Claude가 정리하고 있어요. 30초에서 2분 정도 걸릴 수 있어요.');
+  note('source-note', 'info', `${WORKER ? 'AI가' : 'Claude가'} 정리하고 있어요. 30초에서 ${WORKER ? 3 : 2}분 정도 걸릴 수 있어요.`);
   try {
     const result = await sample.json(buildPrompt(text), { signal: mine.signal, modelTier: 'default' });
     const items = result && Array.isArray(result.recipes) ? result.recipes.filter(r => r && typeof r === 'object') : [];
@@ -401,7 +403,7 @@ async function runExtract(force) {
     else {
       console.warn('extract failed', e && e.code, e && e.message);
       const code = e && e.code === 'invalid_json' && /cut short|truncat|length/i.test(e.message || '') ? 'truncated' : e && e.code;
-      lastKey = ''; note('source-note', 'bad', ERRORS[code] || '추출하지 못했어요. 잠시 뒤 다시 추출해 주세요.');
+      lastKey = ''; note('source-note', 'bad', ERRORS[code] || (WORKER && e && e.message) || '추출하지 못했어요. 잠시 뒤 다시 추출해 주세요.');
     }
   } finally { if (controller === mine) { controller = null; $('extract').disabled = !sample; $('stop').hidden = true; } }
 }

@@ -54,22 +54,43 @@ async function extract(request, env, cors) {
   const body = await request.json().catch(() => null);
   const prompt = body && typeof body.prompt === 'string' ? body.prompt : '';
   if (!prompt || prompt.length > MAX_PROMPT) return json(400, { error: '추출할 내용이 비었거나 너무 깁니다.' }, cors);
+  // 레시피 하나를 쓰는 데 100초가 넘게 걸려, 한 번에 받으면 API 앞단(Cloudflare)이 HTTP 524로 끊습니다.
+  // 그래서 stream으로 받아 글자가 나오는 대로 페이지에 흘려보냅니다. 끝에는 \u0000 뒤에 finish_reason을 붙입니다.
   const res = await fetch(`${env.ANSWER_API_BASE_URL.replace(/\/+$/, '')}/chat/completions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${env.ANSWER_API_KEY}` },
-    body: JSON.stringify({ model: env.ANSWER_API_MODEL, temperature: 0, messages: [{ role: 'user', content: prompt }] }),
+    body: JSON.stringify({ model: env.ANSWER_API_MODEL, temperature: 0, stream: true, messages: [{ role: 'user', content: prompt }] }),
   });
-  if (!res.ok) return json(502, { error: `추출 API 요청이 실패했습니다 (HTTP ${res.status}).` }, cors);
-  const data = await res.json();
-  const text = data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content || '';
-  const start = text.indexOf('{'), end = text.lastIndexOf('}');
-  let result = null;
-  try { result = JSON.parse(text.slice(start, end + 1)); } catch { /* 아래에서 처리 */ }
-  if (!result || typeof result !== 'object') {
-    const cut = data.choices && data.choices[0] && data.choices[0].finish_reason === 'length';
-    return json(422, { error: cut ? 'truncated' : 'invalid_json' }, cors);
+  if (!res.ok || !res.body) return json(502, { error: `추출 API 요청이 실패했습니다 (HTTP ${res.status}).` }, cors);
+  const { readable, writable } = new TransformStream();
+  relay(res.body, writable.getWriter());
+  return new Response(readable, { headers: { 'Content-Type': 'text/plain; charset=utf-8', ...cors } });
+}
+
+async function relay(body, writer) {
+  const reader = body.getReader(), dec = new TextDecoder(), enc = new TextEncoder();
+  let buf = '', finish = '';
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, i).trim();
+        buf = buf.slice(i + 1);
+        if (!line.startsWith('data:') || line === 'data: [DONE]') continue;
+        let choice;
+        try { choice = JSON.parse(line.slice(5)).choices[0]; } catch { continue; }
+        if (choice && choice.delta && choice.delta.content) await writer.write(enc.encode(choice.delta.content));
+        if (choice && choice.finish_reason) finish = choice.finish_reason;
+      }
+    }
+  } catch {
+    finish = 'error';
   }
-  return json(200, result, cors);
+  await writer.write(enc.encode('\u0000' + (finish || 'stop')));
+  await writer.close();
 }
 
 function corsHeaders(env) {
