@@ -192,7 +192,10 @@ const workerSample = {
     const res = await callWorker('/extract', { method: 'POST', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt }) });
     if (!res.ok) { const body = await res.json().catch(() => ({})); throw { code: 'upstream', message: body.error }; }
     // Worker는 모델이 쓰는 글자를 그대로 흘려보내고, 끝에 \u0000 뒤로 finish_reason을 붙입니다.
-    const [text, finish] = (await res.text()).split('\u0000');
+    // 새 추출을 시작하면 이전 요청을 중지(abort)합니다. 응답을 읽는 도중 중지돼도 오류가 아니라 '중지'로 처리합니다.
+    let raw;
+    try { raw = await res.text(); } catch (e) { throw e && e.name === 'AbortError' ? { code: 'cancelled' } : { code: 'network' }; }
+    const [text, finish] = raw.split('\u0000');
     try { return JSON.parse(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1)); }
     catch { throw { code: finish === 'length' ? 'truncated' : finish === 'error' ? 'upstream' : 'invalid_json', message: finish === 'error' ? '추출 API 응답이 중간에 끊겼어요. 다시 추출해 주세요.' : undefined }; }
   },
@@ -461,7 +464,8 @@ async function runExtract(force) {
     runCheck();
     $('meta').scrollIntoView({ behavior: 'smooth', block: 'start' });
   } catch (e) {
-    if (e && e.code === 'cancelled') { if (controller === mine) note('source-note', 'info', '추출을 중지했어요.'); }
+    if (e && (e.code === 'cancelled' || e.name === 'AbortError')) { if (controller === mine) note('source-note', 'info', '추출을 중지했어요.'); }
+    else if (controller !== mine) { /* 이미 새 추출이 시작됨: 이전 요청의 결과는 화면에 쓰지 않습니다. */ }
     else {
       console.warn('extract failed', e && e.code, e && e.message);
       const code = e && e.code === 'invalid_json' && /cut short|truncat|length/i.test(e.message || '') ? 'truncated' : e && e.code;
