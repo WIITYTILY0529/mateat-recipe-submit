@@ -773,7 +773,7 @@ try { $('submitter').value = localStorage.getItem('mateat.submitter') || ''; } c
 $('submitter').addEventListener('change', () => { try { localStorage.setItem('mateat.submitter', $('submitter').value.trim()); } catch { /* 무시 */ } });
 function submitter() {
   const name = $('submitter').value.trim();
-  if (!name) { $('submitter').focus(); throw new Error('내 이름(닉네임이나 이니셜)을 넣어 주세요. 팀원별 묶음을 구분하는 데 써요.'); }
+  if (!name) { $('submitter').focus(); throw new Error('내 이름(닉네임이나 이니셜)을 넣어 주세요. 저장하는 파일을 팀원별로 구분하는 데 써요.'); }
   return name;
 }
 const fileSafe = s => s.replace(/[^\p{L}\p{N}_-]+/gu, '_').slice(0, 20);
