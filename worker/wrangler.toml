@@ -1,0 +1,8 @@
+name = "mateat-recipe-worker"
+main = "index.js"
+compatibility_date = "2024-11-01"
+
+[vars]
+ALLOWED_ORIGIN = "https://wiitytily0529.github.io"
+# 나머지는 저장소에 남지 않도록 `wrangler secret put`으로 넣습니다:
+# PASSCODE, ANSWER_API_BASE_URL, ANSWER_API_KEY, ANSWER_API_MODEL
