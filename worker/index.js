@@ -106,9 +106,14 @@ async function extract(request, env, cors) {
   const res = await fetch(`${env.ANSWER_API_BASE_URL.replace(/\/+$/, '')}/chat/completions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${env.ANSWER_API_KEY}` },
-    body: JSON.stringify({ model: env.ANSWER_API_MODEL, temperature: 0, stream: true, messages: [{ role: 'user', content: prompt }] }),
+    // temperature는 보내지 않습니다. gpt-luna 같은 추론 모델은 temperature=0을 거절합니다(기본값 1만 허용).
+    body: JSON.stringify({ model: env.ANSWER_API_MODEL, stream: true, messages: [{ role: 'user', content: prompt }] }),
   });
-  if (!res.ok || !res.body) return json(502, { error: `추출 API 요청이 실패했습니다 (HTTP ${res.status}).` }, cors);
+  if (!res.ok || !res.body) {
+    // 원인을 알 수 있게 API가 돌려준 오류 문구(키는 들어 있지 않음)를 앞부분만 붙입니다.
+    const detail = (await res.text().catch(() => '')).replace(/\s+/g, ' ').slice(0, 300);
+    return json(502, { error: `추출 API 요청이 실패했습니다 (HTTP ${res.status}). ${detail}`.trim() }, cors);
+  }
   const { readable, writable } = new TransformStream();
   relay(res.body, writable.getWriter());
   return new Response(readable, { headers: { 'Content-Type': 'text/plain; charset=utf-8', ...cors } });
