@@ -264,6 +264,7 @@ async function fetchPost() {
     if (!post.text) throw { code: 'upstream', message: '글 본문을 찾지 못했어요. 비공개 글인지 확인해 주세요.' };
     $('text').value = post.text; $('text').dispatchEvent(new Event('input'));
     $('author').value = post.author || ''; $('comments').value = post.comments ?? ''; $('likes').value = post.likes ?? ''; $('published').value = '';
+    $('likes').placeholder = post.likes === null ? '못 가져옴 · 직접 입력' : '';
     readPaste(`${post.published || ''}\n${post.text}`, post.html);
     if (post.published) publishedRaw = post.published;
     showMeta(); $('to-claude').disabled = false; runExtract(true);

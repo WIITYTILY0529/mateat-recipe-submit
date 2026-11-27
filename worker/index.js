@@ -44,10 +44,27 @@ function postViewUrl(raw) {
 
 /* 공감 수는 화면 스크립트가 나중에 채우므로, Cloudflare 헤드리스 브라우저로 글을 띄워 실제 숫자가 나온 뒤의 HTML을 받습니다.
    (naver_blog.py의 Playwright 단계와 같은 방식) 공감이 정말 0이면 8초 기다린 뒤 그대로 받습니다. */
+/* 무료 요금제는 새 브라우저를 자주 띄우면 429로 막혀서, 살아 있는 세션이 있으면 다시 붙고 없을 때만 새로 띄워 10분간 유지합니다. */
+async function openBrowser(env) {
+  const wait = ms => new Promise(r => setTimeout(r, ms));
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const sessions = await puppeteer.sessions(env.BROWSER).catch(() => []);
+    for (const s of sessions) {
+      if (s.connectionId) continue;  // 다른 요청이 쓰는 중
+      try { return await puppeteer.connect(env.BROWSER, s.sessionId); } catch { /* 다음 세션 */ }
+    }
+    if (sessions.length) { await wait(2_000); continue; }  // 쓰던 세션이 곧 풀리면 그걸 씁니다.
+    try { return await puppeteer.launch(env.BROWSER, { keep_alive: 600_000 }); }
+    catch (e) { if (!/429/.test(String(e && e.message))) throw e; await wait(3_000); }
+  }
+  throw new Error('헤드리스 브라우저를 열지 못했습니다 (요청이 많음).');
+}
+
 async function rendered(env, target) {
-  const browser = await puppeteer.launch(env.BROWSER);
+  const browser = await openBrowser(env);
+  let page;
   try {
-    const page = await browser.newPage();
+    page = await browser.newPage();
     await page.setUserAgent(`Mozilla/5.0 (compatible; ${AGENT})`);
     await page.setRequestInterception(true);
     page.on('request', r => (['image', 'media', 'font'].includes(r.resourceType()) ? r.abort() : r.continue()));
@@ -58,7 +75,8 @@ async function rendered(env, target) {
     ).catch(() => {});
     return await page.content();
   } finally {
-    await browser.close();
+    if (page) await page.close().catch(() => {});
+    browser.disconnect();  // 세션은 닫지 않고 다음 요청이 다시 씁니다.
   }
 }
 
