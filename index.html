@@ -197,8 +197,11 @@ function parsePost(html) {
     return null;
   };
   const count = v => /^[\d,]+$/.test((v || '').trim()) ? Number(v.replace(/,/g, '')) : null;
+  // 댓글 수: <em id="floating_bottom_commentCount">. 댓글이 없으면 비어 있어 0으로 봅니다.
+  const floating = doc.querySelector('#floating_bottom_commentCount');
   const prop = doc.querySelector('#_post_property');
-  let comments = count(prop && prop.getAttribute('commentcount'));
+  let comments = floating ? count(floating.textContent.trim() || '0') : null;
+  if (comments === null) comments = count(prop && prop.getAttribute('commentcount'));
   if (comments === null) {
     const found = new Set([...doc.querySelectorAll('.blog_comment_count, #commentCount, #commentCountView, ._commentCount, .btn_comment .num, .btn_comment .count')].map(n => count(n.textContent)).filter(v => v !== null));
     comments = found.size === 1 ? [...found][0] : null;
@@ -212,9 +215,12 @@ function parsePost(html) {
     body.querySelectorAll('td, th').forEach(n => n.after(' '));
     text = body.textContent.split('\n').map(l => l.replace(/[\s​]+/g, ' ').trim()).join('\n').replace(/\n{3,}/g, '\n\n').trim();
   }
+  // 공감 수: <span class="u_likeit_text _count num">. 받아온 화면에는 자리 표시 0만 있어 0이 아닌 값이 하나일 때만 씁니다.
+  const likeValues = new Set([...doc.querySelectorAll('span.u_likeit_text._count.num')].map(n => count(n.textContent)).filter(v => v));
   return {
-    text, comments, html: body ? body.innerHTML : '',
-    author: meta['author'] || meta['article:author:name'] || pick('.blog_author .name, .se_author .name, .blog2_series .nick, .blog2_series .nickname, .writer_info .nick, .nick'),
+    text, comments, html: body ? body.innerHTML : '', likes: likeValues.size === 1 ? [...likeValues][0] : null,
+    // 작성자: 글 상단 <a class="link pcol2">닉네임</a>
+    author: pick('a.link.pcol2') || meta['author'] || meta['article:author:name'] || pick('.blog_author .name, .se_author .name, .blog2_series .nick, .blog2_series .nickname, .writer_info .nick, .nick'),
     published: meta['article:published_time'] || pick('time[datetime]', 'datetime') || pick('.se_publishDate, .blog_date, .blog2_series .date, ._postAddDate, .post_date'),
   };
 }
@@ -231,7 +237,7 @@ async function fetchPost() {
     const post = parsePost(await res.text());
     if (!post.text) throw { code: 'upstream', message: '글 본문을 찾지 못했어요. 비공개 글인지 확인해 주세요.' };
     $('text').value = post.text; $('text').dispatchEvent(new Event('input'));
-    $('author').value = post.author || ''; $('comments').value = post.comments ?? ''; $('published').value = '';
+    $('author').value = post.author || ''; $('comments').value = post.comments ?? ''; $('likes').value = post.likes ?? ''; $('published').value = '';
     readPaste(`${post.published || ''}\n${post.text}`, post.html);
     if (post.published) publishedRaw = post.published;
     showMeta(); $('to-claude').disabled = false; runExtract(true);
