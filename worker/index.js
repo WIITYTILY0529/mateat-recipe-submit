@@ -1,15 +1,17 @@
 /**
  * Cloudflare Worker — MATEat 레시피 제출 페이지용 서버
- *   GET  /post?url=<네이버 블로그 글 URL>  → 글 HTML (PostView 화면, 헤드리스 브라우저로 띄운 뒤. 실패하면 그냥 받은 HTML)
- *   POST /extract {prompt}                 → 레시피 추출 결과 JSON (OpenAI 호환 API 사용)
- * 두 요청 모두 X-Passcode 헤더가 PASSCODE 비밀값과 같아야 합니다.
- * 비밀값: PASSCODE, ANSWER_API_BASE_URL, ANSWER_API_KEY, ANSWER_API_MODEL / 변수: ALLOWED_ORIGIN
+ *   POST /fetch {url}       → GitHub Actions에서 fetcher/naver_blog.py(Playwright)를 실행하고 작업 id를 돌려줍니다.
+ *   GET  /fetch?id=<id>     → 그 작업이 끝났으면 {status:'done', post:{text, author, likes, comments, published_date}}
+ *   GET  /post?url=<글 URL> → 글 HTML(PostView)을 그냥 받아 돌려줍니다. GitHub 작업이 실패할 때 페이지가 씁니다(공감 수 없음).
+ *   POST /extract {prompt}  → 레시피 추출 결과(OpenAI 호환 API, 스트리밍)
+ * 모든 요청은 X-Passcode 헤더가 PASSCODE 비밀값과 같아야 합니다.
+ * 비밀값: PASSCODE, ANSWER_API_BASE_URL, ANSWER_API_KEY, ANSWER_API_MODEL, GITHUB_TOKEN / 변수: ALLOWED_ORIGIN
  */
-
-import puppeteer from '@cloudflare/puppeteer';
 
 const AGENT = 'MATEatRecipeSource/1.0';
 const MAX_PROMPT = 400_000;
+const REPO = 'WIITYTILY0529/mateat-recipe-submit';
+const WORKFLOW = 'fetch-post.yml';
 
 export default {
   async fetch(request, env) {
@@ -20,12 +22,14 @@ export default {
       return json(401, { error: '팀 암호가 맞지 않습니다.' }, cors);
     }
     try {
-      if (request.method === 'GET' && url.pathname === '/post') return await post(url.searchParams.get('url') || '', env, cors);
+      if (request.method === 'POST' && url.pathname === '/fetch') return await startFetch(request, env, cors);
+      if (request.method === 'GET' && url.pathname === '/fetch') return await fetchStatus(url.searchParams.get('id') || '', env, cors);
+      if (request.method === 'GET' && url.pathname === '/post') return await post(url.searchParams.get('url') || '', cors);
       if (request.method === 'POST' && url.pathname === '/extract') return await extract(request, env, cors);
     } catch (e) {
       return json(502, { error: String(e && e.message || e) }, cors);
     }
-    return json(404, { error: 'GET /post?url= 또는 POST /extract만 지원합니다.' }, cors);
+    return json(404, { error: 'POST /fetch, GET /fetch?id=, GET /post?url=, POST /extract만 지원합니다.' }, cors);
   },
 };
 
@@ -42,59 +46,72 @@ function postViewUrl(raw) {
   return `https://blog.naver.com/PostView.naver?blogId=${id}&logNo=${no}`;
 }
 
-/* 공감 수는 화면 스크립트가 나중에 채우므로, Cloudflare 헤드리스 브라우저로 글을 띄워 실제 숫자가 나온 뒤의 HTML을 받습니다.
-   (naver_blog.py의 Playwright 단계와 같은 방식) 공감이 정말 0이면 8초 기다린 뒤 그대로 받습니다. */
-/* 무료 요금제는 새 브라우저를 자주 띄우면 429로 막혀서, 살아 있는 세션이 있으면 다시 붙고 없을 때만 새로 띄워 10분간 유지합니다. */
-async function openBrowser(env) {
-  const wait = ms => new Promise(r => setTimeout(r, ms));
-  for (let attempt = 0; attempt < 6; attempt++) {
-    const sessions = await puppeteer.sessions(env.BROWSER).catch(() => []);
-    for (const s of sessions) {
-      if (s.connectionId) continue;  // 다른 요청이 쓰는 중
-      try { return await puppeteer.connect(env.BROWSER, s.sessionId); } catch { /* 다음 세션 */ }
-    }
-    if (sessions.length) { await wait(2_000); continue; }  // 쓰던 세션이 곧 풀리면 그걸 씁니다.
-    try { return await puppeteer.launch(env.BROWSER, { keep_alive: 600_000 }); }
-    catch (e) { if (!/429/.test(String(e && e.message))) throw e; await wait(3_000); }
-  }
-  throw new Error('헤드리스 브라우저를 열지 못했습니다 (요청이 많음).');
+function github(env, path, init = {}) {
+  return fetch(`https://api.github.com/repos/${REPO}${path}`, {
+    ...init,
+    headers: {
+      Authorization: `Bearer ${env.GITHUB_TOKEN}`, Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'mateat-recipe-worker', ...(init.headers || {}),
+    },
+  });
 }
 
-async function rendered(env, target) {
-  const browser = await openBrowser(env);
-  let page;
-  try {
-    page = await browser.newPage();
-    await page.setUserAgent(`Mozilla/5.0 (compatible; ${AGENT})`);
-    await page.setRequestInterception(true);
-    page.on('request', r => (['image', 'media', 'font'].includes(r.resourceType()) ? r.abort() : r.continue()));
-    await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 20_000 });
-    await page.waitForFunction(
-      () => [...document.querySelectorAll('span.u_likeit_text._count.num')].some(n => /^[\d,]*[1-9][\d,]*$/.test(n.textContent.trim())),
-      { timeout: 8_000 },
-    ).catch(() => {});
-    return await page.content();
-  } finally {
-    if (page) await page.close().catch(() => {});
-    browser.disconnect();  // 세션은 닫지 않고 다음 요청이 다시 씁니다.
-  }
+/* 공감 수는 네이버 화면 스크립트가 나중에 채우므로, GitHub Actions에서 naver_blog.py가 브라우저(Playwright)로 글을 띄워 읽습니다. */
+async function startFetch(request, env, cors) {
+  const body = await request.json().catch(() => null);
+  const target = postViewUrl(body && typeof body.url === 'string' ? body.url : '');
+  if (!target) return json(400, { error: '글 번호가 있는 네이버 블로그 글 주소를 넣어 주세요.' }, cors);
+  if (!env.GITHUB_TOKEN) return json(503, { error: 'Worker에 GITHUB_TOKEN이 설정되지 않았어요.' }, cors);
+  const id = crypto.randomUUID();
+  const res = await github(env, `/actions/workflows/${WORKFLOW}/dispatches`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ref: 'main', inputs: { url: target, request_id: id } }),
+  });
+  if (res.status !== 204) return json(502, { error: `GitHub 작업을 시작하지 못했습니다 (HTTP ${res.status}).` }, cors);
+  return json(202, { id }, cors);
 }
 
-async function post(raw, env, cors) {
+async function fetchStatus(id, env, cors) {
+  if (!/^[0-9a-f-]{36}$/.test(id)) return json(400, { error: '작업 id가 올바르지 않습니다.' }, cors);
+  const list = await github(env, `/actions/workflows/${WORKFLOW}/runs?event=workflow_dispatch&per_page=30`);
+  if (!list.ok) return json(502, { error: `GitHub 작업 목록을 읽지 못했습니다 (HTTP ${list.status}).` }, cors);
+  const run = (await list.json()).workflow_runs.find(r => r.display_title === `fetch ${id}`);
+  if (!run || run.status !== 'completed') return json(200, { status: 'pending' }, cors);
+  if (run.conclusion !== 'success') return json(200, { status: 'failed', error: `GitHub 작업이 실패했습니다 (${run.conclusion}).` }, cors);
+  const artifacts = await github(env, `/actions/runs/${run.id}/artifacts`);
+  const artifact = artifacts.ok && (await artifacts.json()).artifacts.find(a => a.name === 'post');
+  if (!artifact) return json(200, { status: 'failed', error: 'GitHub 작업 결과 파일이 없습니다.' }, cors);
+  // 결과 zip은 다른 저장소 주소로 넘겨주므로, 그 주소에는 GitHub 토큰을 보내지 않습니다.
+  const link = await github(env, `/actions/artifacts/${artifact.id}/zip`, { redirect: 'manual' });
+  const zip = link.headers.get('Location') ? await fetch(link.headers.get('Location')) : link;
+  if (!zip.ok) return json(502, { error: `GitHub 작업 결과를 받지 못했습니다 (HTTP ${zip.status}).` }, cors);
+  const result = JSON.parse(await firstFileInZip(await zip.arrayBuffer()));
+  if (result.error) return json(200, { status: 'failed', error: result.error }, cors);
+  return json(200, { status: 'done', post: result }, cors);
+}
+
+/* 파일 하나가 든 zip(GitHub artifact)에서 그 파일 내용을 글자로 꺼냅니다. */
+async function firstFileInZip(buffer) {
+  const view = new DataView(buffer);
+  let end = buffer.byteLength - 22;
+  while (end >= 0 && view.getUint32(end, true) !== 0x06054b50) end--;
+  if (end < 0) throw new Error('GitHub 작업 결과 zip을 읽지 못했습니다.');
+  const entry = view.getUint32(end + 16, true);
+  const method = view.getUint16(entry + 10, true), size = view.getUint32(entry + 20, true), local = view.getUint32(entry + 42, true);
+  const start = local + 30 + view.getUint16(local + 26, true) + view.getUint16(local + 28, true);
+  const data = new Uint8Array(buffer, start, size);
+  if (method === 0) return new TextDecoder().decode(data);
+  return new Response(new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate-raw'))).text();
+}
+
+async function post(raw, cors) {
   const target = postViewUrl(raw);
   if (!target) return json(400, { error: '글 번호가 있는 네이버 블로그 글 주소를 넣어 주세요.' }, cors);
-  let html = null, how = 'static';
-  if (env.BROWSER) {
-    try { html = await rendered(env, target); how = 'rendered'; }
-    catch (e) { console.log('render failed, falling back to plain fetch:', e && e.message); }
-  }
-  if (!html) {
-    const res = await fetch(target, { headers: { 'User-Agent': AGENT, Accept: 'text/html' }, redirect: 'follow' });
-    if (!res.ok) return json(502, { error: `네이버가 글을 돌려주지 않았습니다 (HTTP ${res.status}).` }, cors);
-    html = await res.text();
-  }
+  const res = await fetch(target, { headers: { 'User-Agent': AGENT, Accept: 'text/html' }, redirect: 'follow' });
+  if (!res.ok) return json(502, { error: `네이버가 글을 돌려주지 않았습니다 (HTTP ${res.status}).` }, cors);
+  const html = await res.text();
   if (html.length > 5_000_000) return json(502, { error: '글 화면이 너무 큽니다.' }, cors);
-  return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8', 'X-Post-Source': how, ...cors } });
+  return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8', ...cors } });
 }
 
 async function extract(request, env, cors) {
@@ -150,7 +167,6 @@ function corsHeaders(env) {
     'Access-Control-Allow-Origin': env.ALLOWED_ORIGIN || '*',
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, X-Passcode',
-    'Access-Control-Expose-Headers': 'X-Post-Source',
     Vary: 'Origin',
   };
 }

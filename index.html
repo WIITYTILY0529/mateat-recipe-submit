@@ -249,8 +249,8 @@ function parsePost(html, rendered) {
     body.querySelectorAll('td, th').forEach(n => n.after(' '));
     text = body.textContent.split('\n').map(l => l.replace(/[\s​]+/g, ' ').trim()).join('\n').replace(/\n{3,}/g, '\n\n').trim();
   }
-  // 공감 수: <span class="u_likeit_text _count num">. Worker가 헤드리스 브라우저로 띄운 화면(rendered)이면 실제 숫자가 들어 있고,
-  // 그냥 받은 화면이면 자리 표시 0만 있어 0이 아닌 값이 하나일 때만 씁니다.
+  // 공감 수: <span class="u_likeit_text _count num">. 그냥 받은 HTML에는 자리 표시 0만 있어 0이 아닌 값이 하나일 때만 씁니다.
+  // (실제 공감 수는 GitHub Actions의 naver_blog.py가 브라우저로 띄워 읽습니다. rendered는 브라우저로 띄운 HTML일 때 true)
   const likeSpans = [...doc.querySelectorAll('span.u_likeit_text._count.num')].map(n => count(n.textContent)).filter(v => v !== null);
   const likeValues = new Set(likeSpans.filter(v => v));
   const likes = likeValues.size === 1 ? [...likeValues][0] : rendered && likeSpans.length && !likeValues.size ? 0 : null;
@@ -261,17 +261,44 @@ function parsePost(html, rendered) {
     published: meta['article:published_time'] || pick('time[datetime]', 'datetime') || pick('.se_publishDate, .blog_date, .blog2_series .date, ._postAddDate, .post_date'),
   };
 }
+/* GitHub Actions에서 naver_blog.py(Playwright)로 글을 띄워 작성자·공감·댓글·본문을 읽습니다.
+   Worker가 작업을 시작하고, 끝나면 결과를 돌려줍니다. 보통 30~60초 걸립니다. */
+async function githubPost(url) {
+  const start = await callWorker('/fetch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }) });
+  const started = await start.json().catch(() => ({}));
+  if (!start.ok) throw { code: 'upstream', message: started.error };
+  const t0 = Date.now();
+  while (Date.now() - t0 < 180_000) {
+    note('source-note', 'info', `GitHub에서 네이버 글을 열어 작성자·공감·댓글을 읽고 있어요… ${Math.round((Date.now() - t0) / 1000)}초 (보통 30~60초)`);
+    await new Promise(r => setTimeout(r, 4000));
+    const res = await callWorker('/fetch?id=' + encodeURIComponent(started.id));
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || body.status === 'failed') throw { code: 'upstream', message: body.error };
+    if (body.status === 'done') {
+      const p = body.post || {};
+      return { text: p.text || '', author: p.author || null, comments: p.comments ?? null, likes: p.likes ?? null, published: p.published_date || null };
+    }
+  }
+  throw { code: 'upstream', message: 'GitHub 작업이 3분 안에 끝나지 않았어요.' };
+}
 async function fetchPost() {
   const url = postUrl($('url').value);
   if (!url) return note('source-note', 'bad', '글 번호가 있는 네이버 블로그 글 주소(https://blog.naver.com/아이디/글번호)를 넣어 주세요.');
   if (!passcode()) return note('source-note', 'bad', '팀 암호를 넣어 주세요.');
   if (DATA.posts[url]) return note('source-note', 'bad', `이미 DB에 등록된 글이에요 (${DATA.posts[url]}). 다른 글을 골라 주세요.`);
   $('url').value = url; $('fetch').disabled = true;
-  note('source-note', 'info', '네이버에서 글을 가져오고 있어요.');
   try {
-    const res = await callWorker('/post?url=' + encodeURIComponent(url));
-    if (!res.ok) { const b = await res.json().catch(() => ({})); throw { code: 'upstream', message: b.error }; }
-    const post = parsePost(await res.text(), res.headers.get('X-Post-Source') === 'rendered');
+    let post = null, why = '';
+    try { post = await githubPost(url); }
+    catch (e) { if (e && (e.code === 'passcode' || e.code === 'network')) throw e; why = (e && e.message) || ''; }
+    if (!post) {
+      // GitHub 작업이 실패하면 글 HTML을 그냥 받아 읽습니다. 작성자·댓글·본문은 그대로 읽히고 공감 수만 직접 입력합니다.
+      note('source-note', 'info', '네이버에서 글을 바로 가져오고 있어요.');
+      const res = await callWorker('/post?url=' + encodeURIComponent(url));
+      if (!res.ok) { const b = await res.json().catch(() => ({})); throw { code: 'upstream', message: b.error }; }
+      post = parsePost(await res.text(), false);
+      if (why) console.warn('GitHub fetch failed:', why);
+    }
     if (!post.text) throw { code: 'upstream', message: '글 본문을 찾지 못했어요. 비공개 글인지 확인해 주세요.' };
     $('text').value = post.text; $('text').dispatchEvent(new Event('input'));
     $('author').value = post.author || ''; $('comments').value = post.comments ?? ''; $('likes').value = post.likes ?? ''; $('published').value = '';

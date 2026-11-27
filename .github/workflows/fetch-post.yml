@@ -1,0 +1,46 @@
+# 제출 페이지의 '링크로 글 가져오기'가 Worker를 통해 실행합니다.
+# fetcher/naver_blog.py가 Playwright로 네이버 글을 띄워 작성자(a.link.pcol2), 공감(span.u_likeit_text._count.num),
+# 댓글(em#commentCount), 본문을 읽고 결과를 'post' artifact(result.json)로 올립니다. Worker가 그 파일을 읽어 페이지에 돌려줍니다.
+name: Fetch Naver post
+run-name: fetch ${{ inputs.request_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 네이버 블로그 글 주소
+        required: true
+        type: string
+      request_id:
+        description: Worker가 결과를 찾는 데 쓰는 id
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: fetcher/requirements.txt
+      - run: pip install -r fetcher/requirements.txt
+      - name: Read the post
+        env:
+          POST_URL: ${{ inputs.url }}  # 셸에 직접 넣지 않고 환경 변수로 넘깁니다.
+          PLAYWRIGHT_CHANNEL: chrome   # 실행 서버에 설치된 Chrome을 씁니다.
+        run: |
+          if ! python fetcher/naver_blog.py "$POST_URL" > result.json 2> error.txt; then
+            python -c 'import json; print(json.dumps({"error": open("error.txt", encoding="utf-8").read().strip()[-500:] or "글을 읽지 못했습니다."}, ensure_ascii=False))' > result.json
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: post
+          path: result.json
+          retention-days: 1
