@@ -80,6 +80,10 @@ details.alt input { margin-top: 8px }
 
   <section class="panel" aria-labelledby="h-source">
     <h2 id="h-source">원문 붙여넣기</h2>
+    <div class="field" style="max-width:320px">
+      <label for="submitter">내 이름 <small>닉네임이나 이니셜. 저장하는 파일 이름과 SQL에 들어가요</small></label>
+      <input type="text" id="submitter" maxlength="20" autocomplete="nickname" placeholder="예: 민석, CMS">
+    </div>
     <div class="field">
       <label for="url">원문 URL <small>주소창의 글 주소. 붙여 넣은 내용에 있으면 자동으로 채워집니다</small></label>
       <input type="url" id="url" placeholder="https://blog.naver.com/아이디/글번호" autocomplete="off">
@@ -152,10 +156,6 @@ details.alt input { margin-top: 8px }
 
   <section class="panel" id="bundle" aria-labelledby="h-bundle" hidden>
     <h2 id="h-bundle">SQL 묶음 <small class="count" id="bundle-count"></small></h2>
-    <div class="field" style="max-width:280px">
-      <label for="submitter">내 이름 <small>닉네임이나 이니셜. 파일 이름과 SQL에 들어가요</small></label>
-      <input type="text" id="submitter" maxlength="20" autocomplete="nickname" placeholder="예: 민석, CMS">
-    </div>
     <ol class="bundle-list" id="bundle-list"></ol>
     <div class="actions">
       <button id="bundle-save">묶음 SQL 저장</button>
@@ -544,12 +544,14 @@ function renderPreview(records) {
 $('json').addEventListener('input', () => { passed = false; toggle(); });
 $('check').addEventListener('click', runCheck);
 
+/* recipe_<내 이름>_<블로그 아이디>_<글 번호>.json — 팀원과 글을 파일 이름으로 구분합니다. */
 function fileName(records) {
+  const who = fileSafe(submitter());
   const m = String(records[0].source && records[0].source.url || '').match(/blog\.naver\.com\/([^/?#]+)\/(\d+)/);
-  return m ? `recipe_${m[1]}_${m[2]}.json` : `recipe_${new Date().toISOString().slice(0, 10)}.json`;
+  return m ? `recipe_${who}_${m[1]}_${m[2]}.json` : `recipe_${who}_${new Date().toISOString().slice(0, 10)}.json`;
 }
 $('save').addEventListener('click', async () => {
-  const records = JSON.parse($('json').value), name = fileName(records);
+  let records, name; try { records = JSON.parse($('json').value); name = fileName(records); } catch (e) { return note('review-note', 'bad', e.message); }
   if (!downloads) return note('review-note', 'warn', '이 화면에서는 파일 저장을 쓸 수 없어요. JSON 복사로 내용을 보내 주세요.');
   try {
     await downloads.save({ filename: name, data: JSON.stringify(records, null, 2) + '\n' });
@@ -663,7 +665,6 @@ BEGIN
 END
 $mateat$;`;
 }
-function buildSql(records) { return buildSqlBundle([records]); }
 /* 글 여러 개(각각 레시피 배열)를 한 트랜잭션의 SQL 하나로 묶습니다. */
 function buildSqlBundle(posts, submitter) {
   const urls = posts.map(records => normalizeUrl(String(records[0].source.url)));
@@ -716,23 +717,24 @@ function zipOne(name, text) {
 }
 function checkedRecords() { const records = JSON.parse($('json').value); if (!passed || !Array.isArray(records)) throw new Error('먼저 다시 검사를 통과해 주세요.'); return records; }
 $('save-sql').addEventListener('click', async () => {
-  let records; try { records = checkedRecords(); } catch (e) { return note('review-note', 'bad', e.message); }
-  const sqlName = fileName(records).replace(/\.json$/, '.sql'), zipName = `${sqlName}.zip`;
+  let records, sqlName, sql;
+  try { records = checkedRecords(); sqlName = fileName(records).replace(/\.json$/, '.sql'); sql = buildSqlBundle([records], submitter()); }
+  catch (e) { return note('review-note', 'bad', e.message); }
+  const zipName = `${sqlName}.zip`;
   if (!downloads) return note('review-note', 'warn', '이 화면에서는 파일 저장을 쓸 수 없어요. SQL 복사를 써 주세요.');
   try {
     if (WORKER) {
-      await downloads.save({ filename: sqlName, data: new Blob([buildSql(records)], { type: 'application/sql;charset=utf-8' }) });
+      await downloads.save({ filename: sqlName, data: new Blob([sql], { type: 'application/sql;charset=utf-8' }) });
       return note('review-note', 'ok', `${sqlName}을(를) 저장했어요. Supabase SQL Editor에서 실행하면 추가돼요.`);
     }
-    await downloads.save({ filename: zipName, data: zipOne(sqlName, buildSql(records)) });
+    await downloads.save({ filename: zipName, data: zipOne(sqlName, sql) });
     note('review-note', 'ok', `${zipName}을(를) 저장했어요. 압축을 풀면 ${sqlName} 파일이 나와요. Claude 페이지는 .sql 파일을 직접 저장할 수 없어서 zip으로 묶었어요.`);
   } catch (e) {
     note('review-note', e && e.code === 'declined' ? 'info' : 'warn', e && e.code === 'declined' ? '저장을 취소했어요.' : '파일 저장이 막혀 있어요. SQL 복사를 써 주세요.');
   }
 });
 $('copy-sql').addEventListener('click', async () => {
-  let records; try { records = checkedRecords(); } catch (e) { return note('review-note', 'bad', e.message); }
-  const sql = buildSql(records);
+  let sql; try { sql = buildSqlBundle([checkedRecords()], submitter()); } catch (e) { return note('review-note', 'bad', e.message); }
   try { await navigator.clipboard.writeText(sql); note('review-note', 'ok', 'SQL을 복사했어요. Supabase SQL Editor에 붙여 넣고 실행하세요.'); }
   catch { note('review-note', 'warn', '이 화면에서는 자동 복사가 막혀 있어요. SQL 파일 저장을 써 주세요.'); }
 });
