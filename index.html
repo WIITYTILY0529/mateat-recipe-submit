@@ -84,6 +84,13 @@ details.alt input { margin-top: 8px }
       <div class="field"><label for="passcode">팀 암호 <small>관리자에게 받은 암호</small></label><input type="password" id="passcode" autocomplete="off"></div>
       <div class="field" style="align-content:end"><button id="fetch">링크로 글 가져오기</button></div>
     </div>
+    <div class="actions" id="handoff" hidden>
+      <button id="to-claude" class="ghost" disabled>Claude로 추출</button>
+      <span class="count">가져온 글을 복사하고 Claude 페이지를 열어요. 거기서 Ctrl+V 하면 내 Claude로 추출돼요.</span>
+    </div>
+    <details class="alt" id="json-in-box" hidden><summary>Claude에서 만든 JSON 붙여넣기 (.sql로 저장)</summary>
+      <textarea id="json-in" class="json" style="min-height:120px;margin-top:8px" spellcheck="false" placeholder="Claude 페이지에서 'JSON 복사'한 내용을 붙여 넣으세요"></textarea>
+    </details>
     <div class="field">
       <label for="text">블로그 글 전체 <small>붙여 넣으면 바로 추출을 시작해요</small></label>
       <textarea id="text" class="paste" placeholder="네이버 블로그 글 화면에서 Ctrl+A → Ctrl+C 한 뒤, 여기를 누르고 Ctrl+V"></textarea>
@@ -227,16 +234,45 @@ async function fetchPost() {
     $('author').value = post.author || ''; $('comments').value = post.comments ?? ''; $('published').value = '';
     readPaste(`${post.published || ''}\n${post.text}`, post.html);
     if (post.published) publishedRaw = post.published;
-    showMeta(); runExtract(true);
+    showMeta(); $('to-claude').disabled = false; runExtract(true);
   } catch (e) {
     note('source-note', 'bad', e && e.code === 'passcode' ? '팀 암호가 맞지 않아요.' : e && e.code === 'network' ? '추출 서버에 연결하지 못했어요. 잠시 뒤 다시 시도해 주세요.' : (e && e.message) || '글을 가져오지 못했어요.');
   } finally { $('fetch').disabled = false; }
+}
+/* Claude 판으로 넘기기: 글 정보 줄 + 본문을 복사하고 Claude 페이지를 엽니다. 붙여 넣으면 Claude 판이 URL·날짜·댓글 수를 다시 찾습니다. */
+const CLAUDE_PAGE = 'https://claude.ai/artifact/C1tXxtLAoGKVK6NJxhaA4k';
+async function toClaude() {
+  const lines = [`원문 URL: ${normalizeUrl($('url').value)}`];
+  if ($('author').value) lines.push(`작성자: ${$('author').value}`);
+  if (publishedRaw) lines.push(`작성일: ${publishedRaw}`);
+  if ($('likes').value) lines.push(`공감 ${$('likes').value}`);
+  if ($('comments').value) lines.push(`댓글 ${$('comments').value}`);
+  if ($('mate').checked) lines.push('네이버 메이트 글');
+  const text = `${lines.join('\n')}\n\n${$('text').value}`;
+  const win = window.open(CLAUDE_PAGE, '_blank', 'noopener');
+  try { await navigator.clipboard.writeText(text); note('source-note', 'ok', 'Claude 페이지를 열고 글을 복사했어요. 그 페이지의 \'블로그 글 전체\' 칸을 누르고 Ctrl+V 하세요. 추출이 끝나면 거기서 SQL을 저장하거나, \'JSON 복사\'한 뒤 여기 \'Claude에서 만든 JSON 붙여넣기\'에 넣어 .sql로 저장할 수 있어요.'); }
+  catch { $('text').select(); note('source-note', 'warn', '자동 복사가 막혀 있어요. 선택된 본문을 Ctrl+C로 복사한 뒤 Claude 페이지에 붙여 넣어 주세요.'); }
+  if (!win) note('source-note', 'warn', `팝업이 막혀 있어요. ${CLAUDE_PAGE} 를 직접 열어 주세요.`);
+}
+/* Claude 판에서 만든 JSON을 받아 검사 → JSON·SQL 저장 */
+function loadJson() {
+  const raw = $('json-in').value.trim(); if (!raw) return;
+  let records;
+  try { records = JSON.parse(raw); } catch (e) { return note('source-note', 'bad', 'JSON 형식이 아니에요: ' + e.message); }
+  if (records && !Array.isArray(records)) records = [records];
+  $('json').value = JSON.stringify(records, null, 2);
+  const src = records[0] && records[0].source;
+  if (src && src.url) $('url').value = normalizeUrl(String(src.url));
+  $('review').hidden = false; $('source-note').replaceChildren(); runCheck();
+  $('review').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 (async () => {
   if (WORKER) {
     sample = workerSample; downloads = browserDownloads;
-    $('site-only').hidden = false;
+    $('site-only').hidden = $('handoff').hidden = $('json-in-box').hidden = false;
+    $('to-claude').addEventListener('click', toClaude);
+    $('json-in').addEventListener('input', loadJson);
     $('intro').textContent = '네이버 블로그 글 주소를 넣고 \'링크로 글 가져오기\'를 누르면 글 정보와 레시피(재료·분량·조리 단계)가 자동으로 정리됩니다. 원문과 비교해 고친 뒤 JSON이나 SQL 파일을 DB 관리자에게 보내 주세요. 이 페이지는 DB에 직접 저장하지 않습니다.';
     $('flow').replaceChildren(...['1 글 주소 붙여넣기', '2 링크로 글 가져오기', '3 자동 추출 확인·수정', '4 파일을 관리자에게 전달'].map(t => el('li', '', t)));
     try { $('passcode').value = localStorage.getItem('mateat.passcode') || ''; } catch { /* 저장소를 못 쓰면 매번 입력 */ }
